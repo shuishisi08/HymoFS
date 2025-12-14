@@ -131,24 +131,93 @@ static void hymofs_reorder_mnt_id(void)
     struct mnt_namespace *ns = current->nsproxy->mnt_ns;
     struct mount *m;
     int id = 1;
+    bool is_hymo_mount;
+    
+    // Try to find the starting ID from the first mount
+    if (ns && !list_empty(&ns->list)) {
+        struct mount *first = list_first_entry(&ns->list, struct mount, mnt_list);
+        if (first->mnt_id < 500000) id = first->mnt_id;
+    }
 
     if (!ns) return;
 
-    // Simple reordering: just assign sequential IDs
-    // Note: This is a simplified approach. Real implementation might need to be more careful
-    // about locking and consistency.
-    // We are iterating the list, so we should hold namespace_sem or similar if possible,
-    // but here we are in ioctl context.
-    
-    // Warning: Modifying mnt_id directly is risky and might confuse userspace tools
-    // that rely on stable IDs. But for stealth, we want to hide gaps.
-    
-    // Ideally we should sort by mount order or tree structure.
-    // For now, just linearize them.
-    
     list_for_each_entry(m, &ns->list, mnt_list) {
-        m->mnt_id = id++;
+        is_hymo_mount = false;
+        
+        if (m->mnt_devname && (
+            strcmp(m->mnt_devname, HYMO_MIRROR_PATH) == 0 || 
+            strcmp(m->mnt_devname, HYMO_CTL_PATH) == 0 ||
+            strcmp(m->mnt_devname, HYMO_MIRROR_NAME) == 0 ||
+            strcmp(m->mnt_devname, HYMO_CTL_NAME) == 0
+        )) {
+            is_hymo_mount = true;
+        }
+
+        if (is_hymo_mount && hymo_stealth_enabled) {
+            // Hide it by assigning a high ID (susfs compatible)
+            // 500000 is DEFAULT_KSU_MNT_ID
+            if (m->mnt_id < 500000) {
+                WRITE_ONCE(m->mnt.susfs_mnt_id_backup, m->mnt_id);
+                WRITE_ONCE(m->mnt_id, 500000 + (id % 1000)); // Use a range
+            }
+        } else {
+            // Skip if already hidden (by susfs or us)
+            if (m->mnt_id >= 500000) continue;
+            
+            WRITE_ONCE(m->mnt.susfs_mnt_id_backup, m->mnt_id);
+            WRITE_ONCE(m->mnt_id, id++);
+        }
     }
+}
+
+static void hymofs_spoof_mounts(void)
+{
+    struct mnt_namespace *ns = current->nsproxy->mnt_ns;
+    struct mount *m;
+    char *system_devname = NULL;
+    struct path sys_path;
+
+    if (!ns) return;
+    if (!hymo_stealth_enabled) return;
+
+    // Resolve /system to get its device name
+    if (kern_path("/system", LOOKUP_FOLLOW, &sys_path) == 0) {
+        struct mount *sys_mnt = real_mount(sys_path.mnt);
+        if (sys_mnt && sys_mnt->mnt_devname) {
+            system_devname = kstrdup(sys_mnt->mnt_devname, GFP_KERNEL);
+        }
+        path_put(&sys_path);
+    }
+    
+    // Fallback to / if /system is not separate
+    if (!system_devname) {
+        if (kern_path("/", LOOKUP_FOLLOW, &sys_path) == 0) {
+            struct mount *sys_mnt = real_mount(sys_path.mnt);
+            if (sys_mnt && sys_mnt->mnt_devname) {
+                system_devname = kstrdup(sys_mnt->mnt_devname, GFP_KERNEL);
+            }
+            path_put(&sys_path);
+        }
+    }
+
+    if (!system_devname) return;
+
+    list_for_each_entry(m, &ns->list, mnt_list) {
+        if (m->mnt_devname && (
+            strcmp(m->mnt_devname, HYMO_MIRROR_PATH) == 0 || 
+            strcmp(m->mnt_devname, HYMO_MIRROR_NAME) == 0
+        )) {
+            // Spoof devname
+            const char *old_name = m->mnt_devname;
+            m->mnt_devname = kstrdup(system_devname, GFP_KERNEL);
+            if (m->mnt_devname) {
+                kfree_const(old_name);
+            } else {
+                m->mnt_devname = old_name; // Restore if alloc failed
+            }
+        }
+    }
+    kfree(system_devname);
 }
 
 static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
@@ -183,6 +252,7 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     }
 
     if (cmd == HYMO_IOC_REORDER_MNT_ID) {
+        hymofs_spoof_mounts();
         hymofs_reorder_mnt_id();
         return 0;
     }
@@ -192,6 +262,10 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
         if (copy_from_user(&val, (void __user *)arg, sizeof(val))) return -EFAULT;
         hymo_stealth_enabled = !!val;
         printk(KERN_INFO "hymofs: stealth mode %s\n", hymo_stealth_enabled ? "enabled" : "disabled");
+        if (hymo_stealth_enabled) {
+            hymofs_spoof_mounts();
+            hymofs_reorder_mnt_id();
+        }
         return 0;
     }
 
