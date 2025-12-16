@@ -237,7 +237,7 @@ jobs:
 
           cp ${{ github.workspace }}/patch/hymofs_with_susfs.patch .
 
-          patch -p1 -F 3 < /home/an/hymoworker/HymoFS/patch/hymofs_with_susfs.patch
+          patch -p1 -F 3 < ${{ github.workspace }}/patch/hymofs_with_susfs.patch
 
           echo "  [*] HymoFS 代码注入完成！"
 
