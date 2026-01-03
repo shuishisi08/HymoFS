@@ -217,8 +217,8 @@ jobs:
           if [ "${{ env.APPLY_ADIOS }}" == "On" ]; then
             # Add proxy config
             echo "📦 ADIOS..."
-            echo "MQ_IOSCHED_ADIOS=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "MQ_IOSCHED_DEFAULT_ADIOS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           # Remove check_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
